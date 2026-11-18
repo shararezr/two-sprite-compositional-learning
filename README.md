@@ -57,28 +57,28 @@ two-sprite-compositional-learning/
 
 
 
-\## Data\
-\
-\### Dataset paths\
-\
+## Data
+
+### Dataset paths
+
 The dataset path is configured in \`main.py\`. Update this path to match your local setup before running any experiments.\
-\
-\### Datasets\
-\
-\- \*\*dSprites\*\*: Download the dataset [here](YOUR_DATASET_DOWNLOAD_LINK).\
-\
+
+### Datasets
+
+- \*\*dSprites\*\*: Download the dataset [here](YOUR_DATASET_DOWNLOAD_LINK).\
+
 After downloading, place the dataset in a local directory and update the dataset root path in \`main.py\`.\
-\
+
 For example:\
-\
+
 \`\`\`python\
 "data": {\
     "root": "/path/to/your/dsprites"\
 }\
 \`\`\`\
-\
+
 The dataset is not included in this GitHub repository and must be downloaded separately.\
-\
+
 
 
 
