@@ -1,0 +1,16 @@
+
+save_name: monolithic_diagonal
+
+train:
+ sampling: diagonal
+ sampling_kwargs:
+   delta: 0.2
+
+
+
+
+model:
+  phi_kwargs:
+    d_hidden: 320
+    n_channel: 64
+  monolithic: true

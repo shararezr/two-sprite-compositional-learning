@@ -1,0 +1,32 @@
+save_name: orthogonal_compositional
+
+
+
+data:
+  C_kwargs:
+    add: sigmoid
+    color_channel: false
+    alpha: 0.1
+
+  trainable_C_kwargs:
+    add: sigmoid
+    color_channel: false
+    alpha: 0.1
+    
+train:
+  sampling: orthogonal
+
+  sampling_kwargs:
+    planes:
+      # Plane 1: Slot 0 varies; Slot 1 is fixed.
+      - slot: 1
+        fixed: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+      # Plane 2: Slot 1 varies; Slot 0 is fixed.
+      - slot: 0
+        fixed: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+      # Plane 3: Slot 1 varies; Slot 0 is fixed.
+      - slot: 0
+        fixed: [0.5, 0.0, 0.0, 0.0, 0.516129]
+

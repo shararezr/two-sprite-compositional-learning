@@ -1,0 +1,13 @@
+
+save_name: random_monolithic
+
+train:
+  n_samples: 100000
+  sampling: random
+
+
+model:
+  phi_kwargs:
+    d_hidden: 320
+    n_channel: 64
+  monolithic: true
