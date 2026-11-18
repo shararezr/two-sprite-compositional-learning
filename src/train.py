@@ -1,28 +1,35 @@
 """
-train_2sprite.py
+train.py
+
 
 Training script for compositional two-sprite dSprites.
 
+
 Compatible with:
-    data.py
-    model.py
+   data.py
+   model.py
+
 
 Latent input:
-    [B, 10] for BOTH compositional and monolithic models.
+   [B, 10] for BOTH compositional and monolithic models.
 
-Model inputs are normalized discrete factor labels corresponding
-to the dSprites images used as targets.
+
+Model inputs are normalized labels of directly selected dSprites records.
+Evaluation sampling="train" inherits the training sampler and its settings.
+
 
 Image representation:
-    [B, 64, 64, 1]
+   [B, 64, 64, 1]
 """
 
-import argparse
+
 import copy
 import datetime
 import random
+import warnings
 from math import prod
 from pathlib import Path
+
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,2230 +37,2279 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.utils.data import DataLoader, Dataset
+
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import model as models
+
+from . import model as models
+
+
 
 
 try:
-    import wandb
+   import wandb
 except ImportError:
-    wandb = None
+   wandb = None
 
 
-# ================================================================
-# Data imports
-# ================================================================
 
-try:
-    from data import (
-        DSpritesDataset,
-        DSpritesTwoSpriteDataset,
-        CachedCompositionDataset,
-        continuous_to_factor_labels,
-        quantize_latents,
-        FACTOR_SIZES,
-    )
 
-except ModuleNotFoundError as exc:
-    if exc.name != "data":
-        raise
+from .data import DSpritesDataset, DSpritesTwoSpriteDataset, CachedCompositionDataset
 
-    from data_twoSprite import (
-        DSpritesDataset,
-        DSpritesTwoSpriteDataset,
-        CachedCompositionDataset,
-        continuous_to_factor_labels,
-        quantize_latents,
-        FACTOR_SIZES,
-    )
+
 
 
 # ================================================================
 # Constants
 # ================================================================
 
+
 DEVICE = torch.device(
-    "cuda:0" if torch.cuda.is_available() else "cpu"
+   "cuda:0" if torch.cuda.is_available() else "cpu"
 )
 
+
 N_SPRITES = 2
-LATENT_DIM_PER_SPRITE = 5
 LATENT_DIM = 10
+
 
 IMAGE_SHAPE = (64, 64, 1)
 N_PIXELS = prod(IMAGE_SHAPE)
+
+
 
 
 # ================================================================
 # Reproducibility
 # ================================================================
 
+
 def set_seed(seed):
 
-    if seed is None:
-        return
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+   if seed is None:
+       return
 
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
+   random.seed(seed)
+   np.random.seed(seed)
+   torch.manual_seed(seed)
+
+
+   if torch.cuda.is_available():
+       torch.cuda.manual_seed_all(seed)
+
+
 
 
 # ================================================================
 # Model input
 # ================================================================
 
+
 def prepare_model_input(z, monolithic=False):
-    """
-    Both model types receive flattened latent vectors [B, 10].
+   """
+   Both model types receive flattened latent vectors [B, 10].
 
-    The dataset is responsible for converting discrete factor
-    labels into normalized latent coordinates before returning z.
 
-    ParallelSlots splits the flattened input internally.
-    """
+   The dataset is responsible for converting discrete factor
+   labels into normalized latent coordinates before returning z.
 
-    if z.ndim != 2 or z.shape[1] != LATENT_DIM:
-        raise ValueError(
-            f"Expected latent shape [B, {LATENT_DIM}], "
-            f"got {tuple(z.shape)}"
-        )
 
-    return z
+   ParallelSlots splits the flattened input internally.
+   """
+
+
+   if z.ndim != 2 or z.shape[1] != LATENT_DIM:
+       raise ValueError(
+           f"Expected latent shape [B, {LATENT_DIM}], "
+           f"got {tuple(z.shape)}"
+       )
+
+
+   return z
+
+
 
 
 # ================================================================
 # Model configuration
 # ================================================================
 
+
 def get_activation(value):
 
-    if isinstance(value, str):
 
-        if not hasattr(nn, value):
-            raise ValueError(
-                f"Unknown torch.nn activation: {value}"
-            )
+   if isinstance(value, str):
 
-        activation = getattr(nn, value)
 
-        if not isinstance(activation, type):
-            raise ValueError(
-                f"{value} is not an activation class."
-            )
+       if not hasattr(nn, value):
+           raise ValueError(
+               f"Unknown torch.nn activation: {value}"
+           )
 
-        return activation()
 
-    if isinstance(value, type) and issubclass(value, nn.Module):
-        return value()
+       activation = getattr(nn, value)
 
-    if isinstance(value, nn.Module):
-        return copy.deepcopy(value)
 
-    raise TypeError(
-        "nonlin must be an activation name, "
-        "nn.Module class, or nn.Module instance."
-    )
+       if not isinstance(activation, type):
+           raise ValueError(
+               f"{value} is not an activation class."
+           )
+
+
+       return activation()
+
+
+   if isinstance(value, type) and issubclass(value, nn.Module):
+       return value()
+
+
+   if isinstance(value, nn.Module):
+       return copy.deepcopy(value)
+
+
+   raise TypeError(
+       "nonlin must be an activation name, "
+       "nn.Module class, or nn.Module instance."
+   )
+
+
 
 
 def prepare_model_kwargs(kwargs):
 
-    kwargs = copy.deepcopy(kwargs)
 
-    if "nonlin" in kwargs:
-        kwargs["nonlin"] = get_activation(
-            kwargs["nonlin"]
-        )
+   kwargs = copy.deepcopy(kwargs)
 
-    return kwargs
+
+   if "nonlin" in kwargs:
+       kwargs["nonlin"] = get_activation(
+           kwargs["nonlin"]
+       )
+
+
+   return kwargs
+
+
 
 
 # ================================================================
 # Objectness loss
 # ================================================================
 
+
 def get_pairwise_dists(w, h, device=None):
 
-    if device is None:
-        device = DEVICE
 
-    x = torch.arange(
-        w,
-        device=device,
-    ).view(1, -1).repeat(h, 1)
+   if device is None:
+       device = DEVICE
 
-    y = torch.arange(
-        h,
-        device=device,
-    ).view(-1, 1).repeat(1, w)
 
-    grid = torch.stack(
-        [x, y],
-        dim=0,
-    ).unsqueeze(0)
+   x = torch.arange(
+       w,
+       device=device,
+   ).view(1, -1).repeat(h, 1)
 
-    pairwise_diff = (
-        grid.view(1, 2, -1).unsqueeze(-1)
-        - grid.view(1, 2, 1, -1)
-    )
 
-    return torch.sqrt(
-        torch.sum(pairwise_diff ** 2, dim=1)
-    )
+   y = torch.arange(
+       h,
+       device=device,
+   ).view(-1, 1).repeat(1, w)
+
+
+   grid = torch.stack(
+       [x, y],
+       dim=0,
+   ).unsqueeze(0)
+
+
+   pairwise_diff = (
+       grid.view(1, 2, -1).unsqueeze(-1)
+       - grid.view(1, 2, 1, -1)
+   )
+
+
+   return torch.sqrt(
+       torch.sum(pairwise_diff ** 2, dim=1)
+   )
+
+
 
 
 def objectness_score(input, pairwise_dist):
 
-    batch_size = input.shape[0]
 
-    input = input.abs().sum(-1)
+   batch_size = input.shape[0]
 
-    input_min = input.min()
-    input_max = input.max()
 
-    input = (
-        (input - input_min)
-        / (input_max - input_min + 1e-8)
-    )
+   input = input.abs().sum(-1)
 
-    weighted_pairwise_dist = (
-        pairwise_dist
-        * input.reshape(batch_size, -1, 1)
-        * input.reshape(batch_size, 1, -1)
-    )
 
-    return weighted_pairwise_dist.mean()
+   input_min = input.min()
+   input_max = input.max()
+
+
+   input = (
+       (input - input_min)
+       / (input_max - input_min + 1e-8)
+   )
+
+
+   weighted_pairwise_dist = (
+       pairwise_dist
+       * input.reshape(batch_size, -1, 1)
+       * input.reshape(batch_size, 1, -1)
+   )
+
+
+   return weighted_pairwise_dist.mean()
+
+
 
 
 def objectness_loss_batched(
-    input,
-    pairwise_dists=None,
-    batch_size=16,
+   input,
+   pairwise_dists=None,
+   batch_size=16,
 ):
 
-    if input.shape[0] == 0:
-        raise ValueError(
-            "Objectness loss received an empty batch."
-        )
 
-    if batch_size < 1:
-        raise ValueError(
-            "Objectness batch_size must be positive."
-        )
+   if input.shape[0] == 0:
+       raise ValueError(
+           "Objectness loss received an empty batch."
+       )
 
-    if pairwise_dists is None:
-        pairwise_dists = get_pairwise_dists(
-            input.shape[2],
-            input.shape[1],
-            device=input.device,
-        )
 
-    total_loss = input.new_tensor(0.0)
-    total_samples = input.shape[0]
+   if batch_size < 1:
+       raise ValueError(
+           "Objectness batch_size must be positive."
+       )
 
-    for chunk in input.split(batch_size, dim=0):
 
-        chunk_loss = objectness_score(
-            chunk,
-            pairwise_dists,
-        )
+   if pairwise_dists is None:
+       pairwise_dists = get_pairwise_dists(
+           input.shape[2],
+           input.shape[1],
+           device=input.device,
+       )
 
-        total_loss += (
-            chunk_loss * chunk.shape[0] / total_samples
-        )
 
-    return total_loss
+   total_loss = input.new_tensor(0.0)
+   total_samples = input.shape[0]
+
+
+   for chunk in input.split(batch_size, dim=0):
+
+
+       chunk_loss = objectness_score(
+           chunk,
+           pairwise_dists,
+       )
+
+
+       total_loss += (
+           chunk_loss * chunk.shape[0] / total_samples
+       )
+
+
+   return total_loss
+
+
 
 
 class ObjectnessLoss(nn.Module):
 
-    def __init__(
-        self,
-        size=(64, 64),
-        batch_size=16,
-    ):
 
-        super().__init__()
+   def __init__(
+       self,
+       size=(64, 64),
+       batch_size=16,
+   ):
 
-        self.batch_size = batch_size
 
-        self.register_buffer(
-            "pairwise_dists",
-            get_pairwise_dists(
-                size[1],
-                size[0],
-                device=DEVICE,
-            ),
-        )
+       super().__init__()
 
-    def forward(self, input):
 
-        return objectness_loss_batched(
-            input,
-            self.pairwise_dists,
-            self.batch_size,
-        )
+       self.batch_size = batch_size
+
+
+       self.register_buffer(
+           "pairwise_dists",
+           get_pairwise_dists(
+               size[1],
+               size[0],
+               device=DEVICE,
+           ),
+       )
+
+
+   def forward(self, input):
+
+
+       return objectness_loss_batched(
+           input,
+           self.pairwise_dists,
+           self.batch_size,
+       )
+
+
 
 
 # ================================================================
 # Loss functions
 # ================================================================
 
+
 def build_criterion(name, alpha=1.0, **kwargs):
 
-    if name == "L1":
-        return nn.L1Loss(**kwargs)
 
-    if name in ("MSE", "L2"):
-        return nn.MSELoss(**kwargs)
+   if name == "L1":
+       return nn.L1Loss(**kwargs)
 
-    if name == "crossentropy":
-        raise ValueError(
-            "CrossEntropyLoss is not appropriate for "
-            "grayscale image regression."
-        )
 
-    if name == "MSE+sparsity":
+   if name in ("MSE", "L2"):
+       return nn.MSELoss(**kwargs)
 
-        def criterion(target, prediction):
 
-            return (
-                F.mse_loss(target, prediction)
-                + alpha * torch.norm(prediction, p=1)
-            )
+   if name == "crossentropy":
+       raise ValueError(
+           "CrossEntropyLoss is not appropriate for "
+           "grayscale image regression."
+       )
 
-        return criterion
 
-    if name == "MSE+objectness":
+   if name == "MSE+sparsity":
 
-        objectness = ObjectnessLoss(
-            size=(64, 64),
-            batch_size=kwargs.get(
-                "objectness_batch_size",
-                16,
-            ),
-        ).to(DEVICE)
 
-        def criterion(target, prediction):
+       def criterion(target, prediction):
 
-            return (
-                F.mse_loss(target, prediction)
-                + alpha * objectness(prediction)
-            )
 
-        return criterion
+           return (
+               F.mse_loss(target, prediction)
+               + alpha * torch.norm(prediction, p=1)
+           )
 
-    raise ValueError(
-        f"Unknown criterion: {name}"
-    )
+
+       return criterion
+
+
+   if name == "MSE+objectness":
+
+
+       objectness = ObjectnessLoss(
+           size=(64, 64),
+           batch_size=kwargs.get(
+               "objectness_batch_size",
+               16,
+           ),
+       ).to(DEVICE)
+
+
+       def criterion(target, prediction):
+
+
+           return (
+               F.mse_loss(target, prediction)
+               + alpha * objectness(prediction)
+           )
+
+
+       return criterion
+
+
+   raise ValueError(
+       f"Unknown criterion: {name}"
+   )
+
+
 
 
 # ================================================================
 # Evaluation metrics
 # ================================================================
 
+
 def build_metrics(metric_names):
 
-    n_outputs = N_PIXELS
-    metrics = {}
 
-    for name in metric_names:
+   n_outputs = N_PIXELS
+   metrics = {}
 
-        if name == "R2Score":
 
-            from torchmetrics import R2Score
+   for name in metric_names:
 
-            metrics[name] = R2Score(
-                num_outputs=n_outputs,
-                multioutput="uniform_average",
-            ).to(DEVICE)
 
-        elif name == "R2ScoreVW":
+       if name == "R2Score":
 
-            from torchmetrics import R2Score
 
-            metrics[name] = R2Score(
-                num_outputs=n_outputs,
-                multioutput="variance_weighted",
-            ).to(DEVICE)
+           from torchmetrics import R2Score
 
-        elif name == "MSE":
 
-            from torchmetrics import MeanSquaredError
+           metrics[name] = R2Score(
+               num_outputs=n_outputs,
+               multioutput="uniform_average",
+           ).to(DEVICE)
 
-            metrics[name] = MeanSquaredError().to(DEVICE)
 
-        else:
+       elif name == "R2ScoreVW":
 
-            raise ValueError(
-                f"Unknown metric: {name}"
-            )
 
-    return metrics
+           from torchmetrics import R2Score
+
+
+           metrics[name] = R2Score(
+               num_outputs=n_outputs,
+               multioutput="variance_weighted",
+           ).to(DEVICE)
+
+
+       elif name == "MSE":
+
+
+           from torchmetrics import MeanSquaredError
+
+
+           metrics[name] = MeanSquaredError().to(DEVICE)
+
+
+       else:
+
+
+           raise ValueError(
+               f"Unknown metric: {name}"
+           )
+
+
+   return metrics
+
+
 
 
 # ================================================================
 # Evaluation
 # ================================================================
 
+
 @torch.no_grad()
 def evaluate(model, loaders, metric_names, monolithic=False):
 
-    model.eval()
 
-    scores = {}
-    diagnostics_printed = False
+   model.eval()
 
-    def print_stats(name, tensor):
 
-        print(
-            f"{name}: "
-            f"shape={tuple(tensor.shape)}, "
-            f"min={tensor.min().item():.6f}, "
-            f"max={tensor.max().item():.6f}, "
-            f"mean={tensor.mean().item():.6f}, "
-            f"std={tensor.std().item():.6f}"
-        )
+   scores = {}
+   diagnostics_printed = False
 
-    for loader_name, loader in loaders.items():
 
-        sum_squared_error = None
-        sum_y = None
-        sum_y_squared = None
+   def print_stats(name, tensor):
 
-        n_samples = 0
 
-        for batch_idx, (z, target) in enumerate(loader):
+       print(
+           f"{name}: "
+           f"shape={tuple(tensor.shape)}, "
+           f"min={tensor.min().item():.6f}, "
+           f"max={tensor.max().item():.6f}, "
+           f"mean={tensor.mean().item():.6f}, "
+           f"std={tensor.std().item():.6f}"
+       )
 
-            z = z.to(DEVICE)
-            target = target.to(DEVICE)
 
-            model_input = prepare_model_input(
-                z,
-                monolithic,
-            )
+   for loader_name, loader in loaders.items():
 
-            prediction = model(model_input)
 
-            if not diagnostics_printed and batch_idx == 0:
+       sum_squared_error = None
+       sum_y = None
+       sum_y_squared = None
 
-                print("\n" + "=" * 65)
-                print(f"SLOT DIAGNOSTICS - Dataset: {loader_name}")
-                print("=" * 65)
 
-                print("\nMODEL INPUT")
-                print_stats("Model input", model_input)
+       n_samples = 0
 
-                if hasattr(model, "slots"):
 
-                    slot_outputs = model.slots(model_input)
+       for batch_idx, (z, target) in enumerate(loader):
 
-                    if isinstance(slot_outputs, (list, tuple)):
 
-                        for i, slot in enumerate(slot_outputs):
-                            print_stats(f"Slot {i + 1}", slot)
+           z = z.to(DEVICE)
+           target = target.to(DEVICE)
 
-                    elif torch.is_tensor(slot_outputs):
 
-                        print_stats(
-                            "Combined slot output",
-                            slot_outputs,
-                        )
+           model_input = prepare_model_input(
+               z,
+               monolithic,
+           )
 
-                        if (
-                            slot_outputs.ndim >= 2
-                            and slot_outputs.shape[0] == model_input.shape[0]
-                            and slot_outputs.shape[1] == 2
-                        ):
 
-                            for i in range(2):
+           prediction = model(model_input)
 
-                                print_stats(
-                                    f"Slot {i + 1}",
-                                    slot_outputs[:, i],
-                                )
 
-                        elif (
-                            slot_outputs.ndim >= 2
-                            and slot_outputs.shape[0] == 2
-                            and slot_outputs.shape[1] == model_input.shape[0]
-                        ):
+           if not diagnostics_printed and batch_idx == 0:
 
-                            for i in range(2):
 
-                                print_stats(
-                                    f"Slot {i + 1}",
-                                    slot_outputs[i],
-                                )
+               print("\n" + "=" * 65)
+               print(f"SLOT DIAGNOSTICS - Dataset: {loader_name}")
+               print("=" * 65)
 
-                print("\nTARGET")
-                print_stats("Target", target)
 
-                print("\nFINAL PREDICTION")
-                print_stats("Prediction", prediction)
+               print("\nMODEL INPUT")
+               print_stats("Model input", model_input)
 
-                print("=" * 65)
-                print("END SLOT DIAGNOSTICS")
-                print("=" * 65 + "\n")
 
-                diagnostics_printed = True
+               if hasattr(model, "slots"):
 
-            if prediction.shape != target.shape:
 
-                raise ValueError(
-                    f"Prediction shape {prediction.shape} "
-                    f"does not match target shape {target.shape}"
-                )
+                   slot_outputs = model.slots(model_input)
 
-            prediction = prediction.flatten(1).double()
-            target = target.flatten(1).double()
 
-            squared_error = (
-                prediction - target
-            ).square().sum(dim=0)
+                   if isinstance(slot_outputs, (list, tuple)):
 
-            batch_sum = target.sum(dim=0)
-            batch_sum_squared = target.square().sum(dim=0)
 
-            if sum_squared_error is None:
+                       for i, slot in enumerate(slot_outputs):
+                           print_stats(f"Slot {i + 1}", slot)
 
-                sum_squared_error = squared_error
-                sum_y = batch_sum
-                sum_y_squared = batch_sum_squared
 
-            else:
+                   elif torch.is_tensor(slot_outputs):
 
-                sum_squared_error += squared_error
-                sum_y += batch_sum
-                sum_y_squared += batch_sum_squared
 
-            n_samples += target.shape[0]
+                       print_stats(
+                           "Combined slot output",
+                           slot_outputs,
+                       )
 
-        if n_samples == 0:
 
-            raise ValueError(
-                f"Empty evaluation loader: {loader_name}"
-            )
+                       if (
+                           slot_outputs.ndim >= 2
+                           and slot_outputs.shape[0] == model_input.shape[0]
+                           and slot_outputs.shape[1] == 2
+                       ):
 
-        sst = sum_y_squared - sum_y.square() / n_samples
-        valid = sst > 1e-12
 
-        if "MSE" in metric_names:
+                           for i in range(2):
 
-            scores[f"MSE_{loader_name}"] = (
-                sum_squared_error.sum()
-                / (n_samples * target.shape[1])
-            ).item()
 
-        if "R2Score" in metric_names:
+                               print_stats(
+                                   f"Slot {i + 1}",
+                                   slot_outputs[:, i],
+                               )
 
-            if valid.any():
 
-                r2_per_pixel = (
-                    1.0 - sum_squared_error[valid] / sst[valid]
-                )
+                       elif (
+                           slot_outputs.ndim >= 2
+                           and slot_outputs.shape[0] == 2
+                           and slot_outputs.shape[1] == model_input.shape[0]
+                       ):
 
-                scores[f"R2Score_{loader_name}"] = (
-                    r2_per_pixel.mean().item()
-                )
 
-            else:
+                           for i in range(2):
 
-                scores[f"R2Score_{loader_name}"] = float("nan")
 
-        if "R2ScoreVW" in metric_names:
+                               print_stats(
+                                   f"Slot {i + 1}",
+                                   slot_outputs[i],
+                               )
 
-            total_sst = sst.sum()
 
-            scores[f"R2ScoreVW_{loader_name}"] = (
-                (
-                    1.0
-                    - sum_squared_error.sum() / total_sst
-                ).item()
-                if total_sst > 1e-12
-                else float("nan")
-            )
+               print("\nTARGET")
+               print_stats("Target", target)
 
-    return scores
+
+               print("\nFINAL PREDICTION")
+               print_stats("Prediction", prediction)
+
+
+               print("=" * 65)
+               print("END SLOT DIAGNOSTICS")
+               print("=" * 65 + "\n")
+
+
+               diagnostics_printed = True
+
+
+           if prediction.shape != target.shape:
+
+
+               raise ValueError(
+                   f"Prediction shape {prediction.shape} "
+                   f"does not match target shape {target.shape}"
+               )
+
+
+           prediction = prediction.flatten(1).double()
+           target = target.flatten(1).double()
+
+
+           squared_error = (
+               prediction - target
+           ).square().sum(dim=0)
+
+
+           batch_sum = target.sum(dim=0)
+           batch_sum_squared = target.square().sum(dim=0)
+
+
+           if sum_squared_error is None:
+
+
+               sum_squared_error = squared_error
+               sum_y = batch_sum
+               sum_y_squared = batch_sum_squared
+
+
+           else:
+
+
+               sum_squared_error += squared_error
+               sum_y += batch_sum
+               sum_y_squared += batch_sum_squared
+
+
+           n_samples += target.shape[0]
+
+
+       if n_samples == 0:
+
+
+           raise ValueError(
+               f"Empty evaluation loader: {loader_name}"
+           )
+
+
+       sst = sum_y_squared - sum_y.square() / n_samples
+       valid = sst > 1e-12
+
+
+       if "MSE" in metric_names:
+
+
+           scores[f"MSE_{loader_name}"] = (
+               sum_squared_error.sum()
+               / (n_samples * target.shape[1])
+           ).item()
+
+
+       if "R2Score" in metric_names:
+
+
+           if valid.any():
+
+
+               r2_per_pixel = (
+                   1.0 - sum_squared_error[valid] / sst[valid]
+               )
+
+
+               scores[f"R2Score_{loader_name}"] = (
+                   r2_per_pixel.mean().item()
+               )
+
+
+           else:
+
+
+               scores[f"R2Score_{loader_name}"] = float("nan")
+
+
+       if "R2ScoreVW" in metric_names:
+
+
+           total_sst = sst.sum()
+
+
+           scores[f"R2ScoreVW_{loader_name}"] = (
+               (
+                   1.0
+                   - sum_squared_error.sum() / total_sst
+               ).item()
+               if total_sst > 1e-12
+               else float("nan")
+           )
+
+
+   return scores
+
+
 
 
 # ================================================================
 # Training epoch
 # ================================================================
 
+
 def train_epoch(
-    model,
-    loader,
-    optimizer,
-    criterion,
-    accum_batches=1,
-    monolithic=False,
+   model,
+   loader,
+   optimizer,
+   criterion,
+   accum_batches=1,
+   monolithic=False,
 ):
 
-    if accum_batches < 1:
 
-        raise ValueError(
-            "accum_batches must be at least 1."
-        )
+   if accum_batches < 1:
 
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
 
-    if len(loader) == 0:
+       raise ValueError(
+           "accum_batches must be at least 1."
+       )
 
-        raise ValueError(
-            "Training DataLoader is empty."
-        )
 
-    total_loss = 0.0
-    total_samples = 0
-    n_batches = len(loader)
+   model.train()
+   optimizer.zero_grad(set_to_none=True)
 
-    for batch_idx, (z, target) in enumerate(loader):
 
-        z = z.to(
-            DEVICE,
-            non_blocking=True,
-        )
+   if len(loader) == 0:
 
-        target = target.to(
-            DEVICE,
-            non_blocking=True,
-        )
 
-        model_z = prepare_model_input(
-            z,
-            monolithic=monolithic,
-        )
+       raise ValueError(
+           "Training DataLoader is empty."
+       )
 
-        prediction = model(model_z)
 
-        if prediction.shape != target.shape:
+   total_loss = 0.0
+   total_samples = 0
+   n_batches = len(loader)
 
-            raise ValueError(
-                "Prediction and target shapes differ: "
-                f"{tuple(prediction.shape)} vs "
-                f"{tuple(target.shape)}"
-            )
 
-        loss = criterion(target, prediction)
+   for batch_idx, (z, target) in enumerate(loader):
 
-        current_batch_size = z.shape[0]
 
-        group_start = (
-            batch_idx // accum_batches
-        ) * accum_batches
+       z = z.to(
+           DEVICE,
+           non_blocking=True,
+       )
 
-        group_end = min(
-            group_start + accum_batches,
-            n_batches,
-        )
 
-        group_size = 0
+       target = target.to(
+           DEVICE,
+           non_blocking=True,
+       )
 
-        for batch_number in range(group_start, group_end):
 
-            start = batch_number * loader.batch_size
+       model_z = prepare_model_input(
+           z,
+           monolithic=monolithic,
+       )
 
-            end = min(
-                start + loader.batch_size,
-                len(loader.dataset),
-            )
 
-            group_size += end - start
+       prediction = model(model_z)
 
-        if group_size <= 0:
 
-            raise RuntimeError(
-                "Invalid gradient accumulation group."
-            )
+       if prediction.shape != target.shape:
 
-        scaled_loss = loss * (
-            current_batch_size / group_size
-        )
 
-        scaled_loss.backward()
+           raise ValueError(
+               "Prediction and target shapes differ: "
+               f"{tuple(prediction.shape)} vs "
+               f"{tuple(target.shape)}"
+           )
 
-        total_loss += (
-            loss.detach().item() * current_batch_size
-        )
 
-        total_samples += current_batch_size
+       loss = criterion(target, prediction)
 
-        should_step = (
-            (batch_idx + 1) % accum_batches == 0
-            or (batch_idx + 1) == n_batches
-        )
 
-        if should_step:
+       current_batch_size = z.shape[0]
 
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
 
-    return total_loss / total_samples
+       group_start = (
+           batch_idx // accum_batches
+       ) * accum_batches
+
+
+       group_end = min(
+           group_start + accum_batches,
+           n_batches,
+       )
+
+
+       group_size = 0
+
+
+       for batch_number in range(group_start, group_end):
+
+
+           start = batch_number * loader.batch_size
+
+
+           end = min(
+               start + loader.batch_size,
+               len(loader.dataset),
+           )
+
+
+           group_size += end - start
+
+
+       if group_size <= 0:
+
+
+           raise RuntimeError(
+               "Invalid gradient accumulation group."
+           )
+
+
+       scaled_loss = loss * (
+           current_batch_size / group_size
+       )
+
+
+       scaled_loss.backward()
+
+
+       total_loss += (
+           loss.detach().item() * current_batch_size
+       )
+
+
+       total_samples += current_batch_size
+
+
+       should_step = (
+           (batch_idx + 1) % accum_batches == 0
+           or (batch_idx + 1) == n_batches
+       )
+
+
+       if should_step:
+
+
+           optimizer.step()
+           optimizer.zero_grad(set_to_none=True)
+
+
+   return total_loss / total_samples
+
+
 
 
 # ================================================================
 # Model construction
 # ================================================================
 
+
 def build_models(cfg):
 
-    data_cfg = cfg["data"]
-    model_cfg = cfg["model"]
 
-    D = data_cfg.get("D", [5, 5])
-
-    M = data_cfg.get(
-        "M",
-        [
-            list(IMAGE_SHAPE),
-            list(IMAGE_SHAPE),
-        ],
-    )
-
-    if list(D) != [5, 5]:
-
-        raise ValueError(
-            f"Expected D=[5, 5], got {D}"
-        )
-
-    if len(M) != 2:
-
-        raise ValueError(
-            "Expected two output shapes in data.M."
-        )
-
-    for output_shape in M:
-
-        if tuple(output_shape) != IMAGE_SHAPE:
-
-            raise ValueError(
-                f"Expected output shape {IMAGE_SHAPE}, "
-                f"got {output_shape}"
-            )
-
-    composition_class = getattr(
-        models,
-        data_cfg.get("C", "OccludeAdd"),
-    )
-
-    composition_kwargs = dict(
-        data_cfg.get(
-            "C_kwargs",
-            {
-                "add": "sigmoid",
-                "color_channel": False,
-            },
-        )
-    )
-
-    target_composition = composition_class(
-        **composition_kwargs
-    ).to(DEVICE)
-
-    model_class = getattr(
-        models,
-        model_cfg.get("phi", "UpsampleMLP"),
-    )
-
-    model_kwargs = prepare_model_kwargs(
-        model_cfg.get("phi_kwargs", {})
-    )
-
-    monolithic = model_cfg.get("monolithic", False)
-
-    if monolithic:
-
-        model = model_class(
-            sum(D),
-            M[0],
-            **model_kwargs,
-        ).to(DEVICE)
-
-    else:
-
-        if model_cfg.get("reuse_phi", False):
-
-            if D[0] != D[1] or M[0] != M[1]:
-
-                raise ValueError(
-                    "Cannot reuse slot networks when their "
-                    "input or output dimensions differ."
-                )
-
-            shared_slot = model_class(
-                D[0],
-                M[0],
-                **model_kwargs,
-            )
-
-            trainable_slots = [
-                shared_slot,
-                shared_slot,
-            ]
-
-        else:
-
-            trainable_slots = [
-                model_class(
-                    D[i],
-                    M[i],
-                    **copy.deepcopy(model_kwargs),
-                )
-                for i in range(N_SPRITES)
-            ]
-
-        trainable_parallel = models.ParallelSlots(
-            trainable_slots
-        )
-
-        # Use the same composition for target and model by default.
-        trainable_composition_kwargs = dict(
-            data_cfg.get(
-                "trainable_C_kwargs",
-                composition_kwargs,
-            )
-        )
-
-        trainable_composition = composition_class(
-            **trainable_composition_kwargs
-        )
-
-        model = models.CompositionalFunction(
-            trainable_composition,
-            trainable_parallel,
-        ).to(DEVICE)
-
-    return target_composition, model
+   data_cfg = cfg["data"]
+   model_cfg = cfg["model"]
 
 
-# ================================================================
-# Continuous random evaluation dataset
-# ================================================================
+   D = data_cfg.get("D", [5, 5])
 
-class ContinuousRandomTwoSpriteDataset(Dataset):
-    """
-    Draw continuous latent coordinates, map them to the nearest
-    valid discrete dSprites labels, and return corresponding
-    normalized quantized latents as model inputs.
 
-    Returns:
-        z:      [10]
-        images: [2, 64, 64, 1]
+   M = data_cfg.get(
+       "M",
+       [
+           list(IMAGE_SHAPE),
+           list(IMAGE_SHAPE),
+       ],
+   )
 
-    continuous_z retains the original continuous samples.
-    """
 
-    def __init__(
-        self,
-        source,
-        n_samples,
-        seed=None,
-    ):
+   if list(D) != [5, 5]:
 
-        if n_samples <= 0:
 
-            raise ValueError(
-                "n_samples must be positive."
-            )
+       raise ValueError(
+           f"Expected D=[5, 5], got {D}"
+       )
 
-        self.source = source
 
-        generator = torch.Generator()
+   if len(M) != 2:
 
-        if seed is not None:
-            generator.manual_seed(int(seed))
 
-        # Generate continuous latent samples.
-        self.continuous_z = torch.rand(
-            n_samples,
-            LATENT_DIM,
-            generator=generator,
-        )
+       raise ValueError(
+           "Expected two output shapes in data.M."
+       )
 
-        # Reshape to [N, 2, 5].
-        z_by_sprite = self.continuous_z.reshape(
-            n_samples,
-            N_SPRITES,
-            LATENT_DIM_PER_SPRITE,
-        )
 
-        # Convert continuous coordinates to nearest labels.
-        labels = continuous_to_factor_labels(
-            z_by_sprite,
-            FACTOR_SIZES,
-        )
+   for output_shape in M:
 
-        # Retrieve images corresponding to those labels.
-        images_0 = source.get_images(labels[:, 0])
-        images_1 = source.get_images(labels[:, 1])
 
-        images = np.stack(
-            [images_0, images_1],
-            axis=1,
-        )
+       if tuple(output_shape) != IMAGE_SHAPE:
 
-        self.images = torch.from_numpy(
-            images.astype(np.float32)
-        ).unsqueeze(-1)
 
-        # Quantize the model inputs using data.py's helper.
-        self.z = quantize_latents(
-            self.continuous_z,
-            FACTOR_SIZES,
-        ).float().reshape(
-            n_samples,
-            LATENT_DIM,
-        )
+           raise ValueError(
+               f"Expected output shape {IMAGE_SHAPE}, "
+               f"got {output_shape}"
+           )
 
-        # Check that the returned model inputs are quantized.
-        expected_z = quantize_latents(
-            self.continuous_z,
-            FACTOR_SIZES,
-        ).reshape(
-            n_samples,
-            LATENT_DIM,
-        )
 
-        if not torch.allclose(self.z, expected_z):
-            raise RuntimeError(
-                "Continuous evaluation latents are not correctly "
-                "quantized."
-            )
+   composition_class = getattr(
+       models,
+       data_cfg.get("C", "OccludeAdd"),
+   )
 
-        if len(self.images) != len(self.z):
-            raise RuntimeError(
-                "Continuous evaluation image and latent counts differ."
-            )
 
-    def __len__(self):
-        return len(self.z)
+   composition_kwargs = dict(
+       data_cfg.get(
+           "C_kwargs",
+           {
+               "add": "sigmoid",
+               "color_channel": False,
+           },
+       )
+   )
 
-    def __getitem__(self, index):
 
-        index = int(index)
+   target_composition = composition_class(
+       **composition_kwargs
+   ).to(DEVICE)
 
-        return (
-            self.z[index],
-            self.images[index],
-        )
+
+   model_class = getattr(
+       models,
+       model_cfg.get("phi", "UpsampleMLP"),
+   )
+
+
+   model_kwargs = prepare_model_kwargs(
+       model_cfg.get("phi_kwargs", {})
+   )
+
+
+   monolithic = model_cfg.get("monolithic", False)
+
+
+   if monolithic:
+
+
+       model = model_class(
+           sum(D),
+           M[0],
+           **model_kwargs,
+       ).to(DEVICE)
+
+
+   else:
+
+
+       if model_cfg.get("reuse_phi", False):
+
+
+           if D[0] != D[1] or M[0] != M[1]:
+
+
+               raise ValueError(
+                   "Cannot reuse slot networks when their "
+                   "input or output dimensions differ."
+               )
+
+
+           shared_slot = model_class(
+               D[0],
+               M[0],
+               **model_kwargs,
+           )
+
+
+           trainable_slots = [
+               shared_slot,
+               shared_slot,
+           ]
+
+
+       else:
+
+
+           trainable_slots = [
+               model_class(
+                   D[i],
+                   M[i],
+                   **copy.deepcopy(model_kwargs),
+               )
+               for i in range(N_SPRITES)
+           ]
+
+
+       trainable_parallel = models.ParallelSlots(
+           trainable_slots
+       )
+
+
+       # Use the same composition for target and model by default.
+       trainable_composition_kwargs = dict(
+           data_cfg.get(
+               "trainable_C_kwargs",
+               composition_kwargs,
+           )
+       )
+
+
+       trainable_composition = composition_class(
+           **trainable_composition_kwargs
+       )
+
+
+       model = models.CompositionalFunction(
+           trainable_composition,
+           trainable_parallel,
+       ).to(DEVICE)
+
+
+   return target_composition, model
+
+
 
 
 # ================================================================
 # Dataset construction
 # ================================================================
 
+
 def create_source_dataset(
-    base_dataset,
-    n_samples,
-    sampling,
-    seed=None,
-    **sampling_kwargs,
+   base_dataset,
+   n_samples,
+   sampling,
+   seed=None,
+   **sampling_kwargs,
 ):
 
-    return DSpritesTwoSpriteDataset(
-        dataset=base_dataset,
-        n_samples=n_samples,
-        mode=sampling,
-        seed=seed,
-        **sampling_kwargs,
-    )
+
+   if sampling == "continuous_random":
+       warnings.warn(
+           "continuous_random now selects discrete dataset records uniformly; "
+           "use sampling: random. This does not test continuous generalization.",
+           stacklevel=2,
+       )
+       sampling = "random"
+
+
+   return DSpritesTwoSpriteDataset(
+       dataset=base_dataset,
+       n_samples=n_samples,
+       mode=sampling,
+       seed=seed,
+       **sampling_kwargs,
+   )
+
+
 
 
 def create_cached_dataset(
-    source,
-    target_composition,
-    batch_size=256,
-    num_workers=0,
+   source,
+   target_composition,
+   batch_size=256,
+   num_workers=0,
 ):
 
-    if len(source) == 0:
 
-        raise ValueError(
-            "Cannot cache an empty source dataset."
-        )
-
-    cached = CachedCompositionDataset(
-        source=source,
-        composition=target_composition,
-        device=DEVICE,
-        batch_size=batch_size,
-        num_workers=num_workers,
-    )
-
-    if cached.z.ndim != 2:
-
-        raise ValueError(
-            f"Expected 2D latent tensor, got {cached.z.shape}"
-        )
-
-    if cached.z.shape[1] != LATENT_DIM:
-
-        raise ValueError(
-            f"Expected latent shape [N, {LATENT_DIM}], "
-            f"got {tuple(cached.z.shape)}"
-        )
-
-    if tuple(cached.targets.shape[1:]) != IMAGE_SHAPE:
-
-        raise ValueError(
-            f"Expected target shape [N, {IMAGE_SHAPE}], "
-            f"got {tuple(cached.targets.shape)}"
-        )
-
-    if len(cached.z) != len(cached.targets):
-
-        raise RuntimeError(
-            "Cached latent and target lengths differ."
-        )
-
-    cached.source = None
-    cached.composition = None
-
-    return cached
+   if len(source) == 0:
 
 
-class TensorPairDataset(Dataset):
+       raise ValueError(
+           "Cannot cache an empty source dataset."
+       )
 
-    def __init__(self, z, targets):
 
-        if len(z) != len(targets):
+   cached = CachedCompositionDataset(
+       source=source,
+       composition=target_composition,
+       device=DEVICE,
+       batch_size=batch_size,
+       num_workers=num_workers,
+   )
 
-            raise ValueError(
-                "Latent and target lengths differ."
-            )
 
-        self.z = z
-        self.targets = targets
+   if cached.z.ndim != 2:
 
-    def __len__(self):
-        return len(self.z)
 
-    def __getitem__(self, index):
+       raise ValueError(
+           f"Expected 2D latent tensor, got {cached.z.shape}"
+       )
 
-        return self.z[index], self.targets[index]
+
+   if cached.z.shape[1] != LATENT_DIM:
+
+
+       raise ValueError(
+           f"Expected latent shape [N, {LATENT_DIM}], "
+           f"got {tuple(cached.z.shape)}"
+       )
+
+
+   if tuple(cached.targets.shape[1:]) != IMAGE_SHAPE:
+
+
+       raise ValueError(
+           f"Expected target shape [N, {IMAGE_SHAPE}], "
+           f"got {tuple(cached.targets.shape)}"
+       )
+
+
+   if len(cached.z) != len(cached.targets):
+
+
+       raise RuntimeError(
+           "Cached latent and target lengths differ."
+       )
+
+
+   cached.source = None
+   cached.composition = None
+
+
+   return cached
+
+
 
 
 def make_loader(
-    dataset,
-    batch_size,
-    shuffle=False,
-    num_workers=0,
+   dataset,
+   batch_size,
+   shuffle=False,
+   num_workers=0,
 ):
 
-    if len(dataset) == 0:
 
-        raise ValueError(
-            "Cannot create a DataLoader for an empty dataset."
-        )
+   if len(dataset) == 0:
 
-    if batch_size < 1:
 
-        raise ValueError(
-            "batch_size must be positive."
-        )
+       raise ValueError(
+           "Cannot create a DataLoader for an empty dataset."
+       )
 
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=(DEVICE.type == "cuda"),
-        drop_last=False,
-    )
+
+   if batch_size < 1:
+
+
+       raise ValueError(
+           "batch_size must be positive."
+       )
+
+
+   return DataLoader(
+       dataset,
+       batch_size=batch_size,
+       shuffle=shuffle,
+       num_workers=num_workers,
+       pin_memory=(DEVICE.type == "cuda"),
+       drop_last=False,
+   )
+
+
 
 
 def build_datasets(cfg, target_composition):
 
-    data_cfg = cfg["data"]
-    train_cfg = cfg["train"]
-    eval_cfg = cfg.get("eval", {})
 
-    base_dataset = DSpritesDataset(
-        root=data_cfg["root"],
-    )
+   data_cfg = cfg["data"]
+   train_cfg = cfg["train"]
+   eval_cfg = cfg.get("eval", {})
 
-    cache_batch_size = data_cfg.get(
-        "cache_batch_size",
-        256,
-    )
 
-    num_workers = data_cfg.get(
-        "num_workers",
-        0,
-    )
+   base_dataset = DSpritesDataset(
+       root=data_cfg["root"],
+   )
 
-    base_seed = cfg.get("seed", 42)
 
-    # ------------------------------------------------------------
-    # Training dataset
-    # ------------------------------------------------------------
+   cache_batch_size = data_cfg.get(
+       "cache_batch_size",
+       256,
+   )
 
-    train_seed = train_cfg.get(
-        "seed",
-        base_seed,
-    )
 
-    train_source = create_source_dataset(
-        base_dataset,
-        n_samples=train_cfg["n_samples"],
-        sampling=train_cfg.get("sampling", "random"),
-        seed=train_seed,
-        **train_cfg.get("sampling_kwargs", {}),
-    )
+   num_workers = data_cfg.get(
+       "num_workers",
+       0,
+   )
 
-    # Verify training latent quantization.
-    expected_train_z = quantize_latents(
-        train_source.continuous_z,
-        FACTOR_SIZES,
-    ).reshape(
-        len(train_source),
-        LATENT_DIM,
-    )
 
-    if not torch.allclose(
-        train_source.z,
-        expected_train_z,
-    ):
-        raise RuntimeError(
-            "Training latent inputs are not correctly quantized."
-        )
+   base_seed = cfg.get("seed", 42)
 
-    train_dataset = create_cached_dataset(
-        train_source,
-        target_composition,
-        batch_size=cache_batch_size,
-        num_workers=num_workers,
-    )
 
-    train_loader = make_loader(
-        train_dataset,
-        batch_size=train_cfg["batch_size"],
-        shuffle=True,
-        num_workers=num_workers,
-    )
+   # ------------------------------------------------------------
+   # Training dataset
+   # ------------------------------------------------------------
 
-    # ------------------------------------------------------------
-    # Evaluation datasets
-    # ------------------------------------------------------------
 
-    eval_loaders = {}
+   train_seed = train_cfg.get(
+       "seed",
+       base_seed,
+   )
 
-    used_seeds = set()
 
-    if train_seed is not None:
-        used_seeds.add(int(train_seed))
+   train_source = create_source_dataset(
+       base_dataset,
+       n_samples=train_cfg["n_samples"],
+       sampling=train_cfg.get("sampling", "random"),
+       seed=train_seed,
+       **train_cfg.get("sampling_kwargs", {}),
+   )
 
-    for eval_index, (name, dataset_cfg) in enumerate(
-        eval_cfg.get("data", {}).items()
-    ):
 
-        sampling = dataset_cfg.get(
-            "sampling",
-            "random",
-        )
+   train_dataset = create_cached_dataset(
+       train_source,
+       target_composition,
+       batch_size=cache_batch_size,
+       num_workers=num_workers,
+   )
 
-        n_samples = dataset_cfg.get(
-            "n_samples",
-            1000,
-        )
 
-        default_seed = (
-            None
-            if base_seed is None
-            else int(base_seed) + 10000 + eval_index
-        )
+   train_loader = make_loader(
+       train_dataset,
+       batch_size=train_cfg["batch_size"],
+       shuffle=True,
+       num_workers=num_workers,
+   )
 
-        dataset_seed = dataset_cfg.get(
-            "seed",
-            default_seed,
-        )
 
-        if dataset_seed is not None:
+   # ------------------------------------------------------------
+   # Evaluation datasets
+   # ------------------------------------------------------------
 
-            dataset_seed = int(dataset_seed)
 
-            if dataset_seed in used_seeds:
+   eval_loaders = {}
 
-                raise ValueError(
-                    f"Evaluation dataset {name!r} uses seed "
-                    f"{dataset_seed}, which is already assigned "
-                    "to another dataset."
-                )
 
-            used_seeds.add(dataset_seed)
+   used_seeds = set()
 
-        # --------------------------------------------------------
-        # Continuous random evaluation
-        # --------------------------------------------------------
 
-        if sampling == "continuous_random":
+   if train_seed is not None:
+       used_seeds.add(int(train_seed))
 
-            continuous_dataset = ContinuousRandomTwoSpriteDataset(
-                base_dataset,
-                n_samples=n_samples,
-                seed=dataset_seed,
-            )
 
-            targets = []
+   for eval_index, (name, dataset_cfg) in enumerate(
+       eval_cfg.get("data", {}).items()
+   ):
 
-            with torch.no_grad():
 
-                for start in range(
-                    0,
-                    len(continuous_dataset),
-                    cache_batch_size,
-                ):
+       sampling = dataset_cfg.get(
+           "sampling",
+           "random",
+       )
 
-                    end = min(
-                        start + cache_batch_size,
-                        len(continuous_dataset),
-                    )
 
-                    image_batch = (
-                        continuous_dataset.images[start:end]
-                        .to(DEVICE)
-                    )
+       n_samples = dataset_cfg.get(
+           "n_samples",
+           1000,
+       )
 
-                    target_batch = target_composition(
-                        [
-                            image_batch[:, 0],
-                            image_batch[:, 1],
-                        ]
-                    )
 
-                    targets.append(
-                        target_batch.detach().cpu()
-                    )
+       default_seed = (
+           None
+           if base_seed is None
+           else int(base_seed) + 10000 + eval_index
+       )
 
-            target_tensor = torch.cat(
-                targets,
-                dim=0,
-            )
 
-            if len(target_tensor) != len(continuous_dataset):
-                raise RuntimeError(
-                    "Continuous evaluation target count does not "
-                    "match the dataset length."
-                )
+       dataset_seed = dataset_cfg.get(
+           "seed",
+           default_seed,
+       )
 
-            if tuple(target_tensor.shape[1:]) != IMAGE_SHAPE:
-                raise ValueError(
-                    f"Expected continuous evaluation targets with "
-                    f"shape [N, {IMAGE_SHAPE}], got "
-                    f"{tuple(target_tensor.shape)}."
-                )
 
-            eval_dataset = TensorPairDataset(
-                continuous_dataset.z,
-                target_tensor,
-            )
+       if dataset_seed is not None:
 
-        # --------------------------------------------------------
-        # Ordinary evaluation datasets
-        # --------------------------------------------------------
 
-        else:
+           dataset_seed = int(dataset_seed)
 
-            source = create_source_dataset(
-                base_dataset,
-                n_samples=n_samples,
-                sampling=sampling,
-                seed=dataset_seed,
-                **dataset_cfg.get("sampling_kwargs", {}),
-            )
 
-            eval_dataset = create_cached_dataset(
-                source,
-                target_composition,
-                batch_size=cache_batch_size,
-                num_workers=num_workers,
-            )
+           if dataset_seed in used_seeds:
 
-        eval_loaders[name] = make_loader(
-            eval_dataset,
-            batch_size=eval_cfg.get("batch_size", 128),
-            shuffle=False,
-            num_workers=num_workers,
-        )
 
-    return train_loader, eval_loaders
+               raise ValueError(
+                   f"Evaluation dataset {name!r} uses seed "
+                   f"{dataset_seed}, which is already assigned "
+                   "to another dataset."
+               )
+
+
+           used_seeds.add(dataset_seed)
+
+
+       sampling_kwargs = dataset_cfg.get("sampling_kwargs", {})
+       if sampling == "train":
+           sampling = train_cfg.get("sampling", "random")
+           sampling_kwargs = {
+               **train_cfg.get("sampling_kwargs", {}),
+               **sampling_kwargs,
+           }
+
+
+       source = create_source_dataset(
+           base_dataset,
+           n_samples=n_samples,
+           sampling=sampling,
+           seed=dataset_seed,
+           **sampling_kwargs,
+       )
+       eval_dataset = create_cached_dataset(
+           source,
+           target_composition,
+           batch_size=cache_batch_size,
+           num_workers=num_workers,
+       )
+
+
+       eval_loaders[name] = make_loader(
+           eval_dataset,
+           batch_size=eval_cfg.get("batch_size", 128),
+           shuffle=False,
+           num_workers=num_workers,
+       )
+
+
+   return train_loader, eval_loaders
+
+
 
 
 # ================================================================
 # Visualisation
 # ================================================================
 
+
 @torch.no_grad()
 def visualize_reconstruction(
-    model,
-    loader,
-    monolithic=False,
-    n_examples=4,
+   model,
+   loader,
+   monolithic=False,
+   n_examples=4,
 ):
 
-    model.eval()
 
-    z, target = next(iter(loader))
+   model.eval()
 
-    n_examples = min(
-        n_examples,
-        len(z),
-    )
 
-    z = z[:n_examples].to(DEVICE)
-    target = target[:n_examples]
+   z, target = next(iter(loader))
 
-    prediction = model(
-        prepare_model_input(z, monolithic)
-    )
 
-    slot_outputs = []
+   n_examples = min(
+       n_examples,
+       len(z),
+   )
 
-    if not monolithic and hasattr(model, "slots"):
 
-        slot_outputs = model.slots(z)
+   z = z[:n_examples].to(DEVICE)
+   target = target[:n_examples]
 
-        if not isinstance(slot_outputs, (list, tuple)):
-            slot_outputs = []
 
-    prediction = prediction.cpu()
+   prediction = model(
+       prepare_model_input(z, monolithic)
+   )
 
-    slot_outputs = [
-        slot.cpu()
-        for slot in slot_outputs
-    ]
 
-    n_cols = 2 + len(slot_outputs)
+   slot_outputs = []
 
-    fig, axes = plt.subplots(
-        n_examples,
-        n_cols,
-        figsize=(3 * n_cols, 3 * n_examples),
-        squeeze=False,
-    )
 
-    for i in range(n_examples):
+   if not monolithic and hasattr(model, "slots"):
 
-        axes[i, 0].imshow(
-            target[i].squeeze(-1),
-            cmap="gray",
-            vmin=0,
-            vmax=1,
-        )
 
-        axes[i, 0].set_title("Target")
+       slot_outputs = model.slots(z)
 
-        axes[i, 1].imshow(
-            prediction[i].squeeze(-1),
-            cmap="gray",
-            vmin=0,
-            vmax=1,
-        )
 
-        axes[i, 1].set_title("Prediction")
+       if not isinstance(slot_outputs, (list, tuple)):
+           slot_outputs = []
 
-        for slot_idx, slot in enumerate(slot_outputs):
 
-            axes[i, slot_idx + 2].imshow(
-                slot[i].squeeze(-1),
-                cmap="gray",
-                vmin=0,
-                vmax=1,
-            )
+   prediction = prediction.cpu()
 
-            axes[i, slot_idx + 2].set_title(
-                f"Slot {slot_idx + 1}"
-            )
 
-        for ax in axes[i]:
-            ax.axis("off")
+   slot_outputs = [
+       slot.cpu()
+       for slot in slot_outputs
+   ]
 
-    fig.tight_layout()
 
-    return fig
+   n_cols = 2 + len(slot_outputs)
+
+
+   fig, axes = plt.subplots(
+       n_examples,
+       n_cols,
+       figsize=(3 * n_cols, 3 * n_examples),
+       squeeze=False,
+   )
+
+
+   for i in range(n_examples):
+
+
+       axes[i, 0].imshow(
+           target[i].squeeze(-1),
+           cmap="gray",
+           vmin=0,
+           vmax=1,
+       )
+
+
+       axes[i, 0].set_title("Target")
+
+
+       axes[i, 1].imshow(
+           prediction[i].squeeze(-1),
+           cmap="gray",
+           vmin=0,
+           vmax=1,
+       )
+
+
+       axes[i, 1].set_title("Prediction")
+
+
+       for slot_idx, slot in enumerate(slot_outputs):
+
+
+           axes[i, slot_idx + 2].imshow(
+               slot[i].squeeze(-1),
+               cmap="gray",
+               vmin=0,
+               vmax=1,
+           )
+
+
+           axes[i, slot_idx + 2].set_title(
+               f"Slot {slot_idx + 1}"
+           )
+
+
+       for ax in axes[i]:
+           ax.axis("off")
+
+
+   fig.tight_layout()
+
+
+   return fig
+
+
 
 
 @torch.no_grad()
 def visualize_mse_on_grid(
-    model,
-    loader,
-    monolithic=False,
+   model,
+   loader,
+   monolithic=False,
 ):
 
-    model.eval()
 
-    all_mse = []
-    all_z = []
+   model.eval()
 
-    for z, target in loader:
 
-        z = z.to(DEVICE)
-        target = target.to(DEVICE)
+   all_mse = []
+   all_z = []
 
-        prediction = model(
-            prepare_model_input(
-                z,
-                monolithic=monolithic,
-            )
-        )
 
-        mse = (
-            prediction - target
-        ).pow(2).flatten(1).mean(dim=1)
+   for z, target in loader:
 
-        all_mse.append(mse.cpu())
-        all_z.append(z.cpu())
 
-    all_mse = torch.cat(all_mse)
-    all_z = torch.cat(all_z)
+       z = z.to(DEVICE)
+       target = target.to(DEVICE)
 
-    x_position = all_z[:, 3].numpy()
-    y_position = all_z[:, 4].numpy()
-    mse_values = all_mse.numpy()
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+       prediction = model(
+           prepare_model_input(
+               z,
+               monolithic=monolithic,
+           )
+       )
 
-    scatter = ax.scatter(
-        x_position,
-        y_position,
-        c=mse_values,
-        s=12,
-    )
 
-    ax.set_xlabel("First sprite x position")
-    ax.set_ylabel("First sprite y position")
+       mse = (
+           prediction - target
+       ).pow(2).flatten(1).mean(dim=1)
 
-    ax.set_title(
-        "Reconstruction MSE across first-sprite position"
-    )
 
-    fig.colorbar(
-        scatter,
-        ax=ax,
-        label="MSE",
-    )
+       all_mse.append(mse.cpu())
+       all_z.append(z.cpu())
 
-    fig.tight_layout()
 
-    return fig
+   all_mse = torch.cat(all_mse)
+   all_z = torch.cat(all_z)
+
+
+   x_position = all_z[:, 3].numpy()
+   y_position = all_z[:, 4].numpy()
+   mse_values = all_mse.numpy()
+
+
+   fig, ax = plt.subplots(figsize=(7, 6))
+
+
+   scatter = ax.scatter(
+       x_position,
+       y_position,
+       c=mse_values,
+       s=12,
+   )
+
+
+   ax.set_xlabel("First sprite x position")
+   ax.set_ylabel("First sprite y position")
+
+
+   ax.set_title(
+       "Reconstruction MSE across first-sprite position"
+   )
+
+
+   fig.colorbar(
+       scatter,
+       ax=ax,
+       label="MSE",
+   )
+
+
+   fig.tight_layout()
+
+
+   return fig
+
+
 
 
 # ================================================================
 # Checkpointing
 # ================================================================
 
+
 def save_checkpoint(
-    path,
-    model,
-    optimizer=None,
-    scheduler=None,
-    epoch=None,
-    best_scores=None,
-    cfg=None,
+   path,
+   model,
+   optimizer=None,
+   scheduler=None,
+   epoch=None,
+   best_scores=None,
+   cfg=None,
 ):
 
-    checkpoint = {
-        "model": model.state_dict(),
-        "epoch": epoch,
-        "best_scores": best_scores,
-        "config": cfg,
-        "torch_rng_state": torch.get_rng_state(),
-        "numpy_rng_state": np.random.get_state(),
-        "python_rng_state": random.getstate(),
-    }
 
-    if optimizer is not None:
-        checkpoint["optimizer"] = optimizer.state_dict()
+   checkpoint = {
+       "model": model.state_dict(),
+       "epoch": epoch,
+       "best_scores": best_scores,
+       "config": cfg,
+       "torch_rng_state": torch.get_rng_state(),
+       "numpy_rng_state": np.random.get_state(),
+       "python_rng_state": random.getstate(),
+   }
 
-    if scheduler is not None:
-        checkpoint["scheduler"] = scheduler.state_dict()
 
-    if torch.cuda.is_available():
-        checkpoint["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+   if optimizer is not None:
+       checkpoint["optimizer"] = optimizer.state_dict()
 
-    torch.save(checkpoint, path)
+
+   if scheduler is not None:
+       checkpoint["scheduler"] = scheduler.state_dict()
+
+
+   if torch.cuda.is_available():
+       checkpoint["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+
+
+   torch.save(checkpoint, path)
+
+
 
 
 def load_checkpoint(
-    path,
-    model,
-    optimizer=None,
-    scheduler=None,
-    restore_rng=True,
+   path,
+   model,
+   optimizer=None,
+   scheduler=None,
+   restore_rng=True,
 ):
 
-    try:
 
-        checkpoint = torch.load(
-            path,
-            map_location="cpu",
-            weights_only=False,
-        )
+   try:
 
-    except TypeError:
 
-        checkpoint = torch.load(
-            path,
-            map_location="cpu",
-        )
+       checkpoint = torch.load(
+           path,
+           map_location="cpu",
+           weights_only=False,
+       )
 
-    if isinstance(checkpoint, dict) and "model" in checkpoint:
 
-        model.load_state_dict(
-            checkpoint["model"]
-        )
+   except TypeError:
 
-        if optimizer is not None and "optimizer" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer"])
 
-        if scheduler is not None and "scheduler" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler"])
+       checkpoint = torch.load(
+           path,
+           map_location="cpu",
+       )
 
-        if restore_rng:
 
-            if "torch_rng_state" in checkpoint:
-                torch.set_rng_state(
-                    checkpoint["torch_rng_state"].cpu()
-                )
+   if isinstance(checkpoint, dict) and "model" in checkpoint:
 
-            if (
-                torch.cuda.is_available()
-                and "cuda_rng_state" in checkpoint
-            ):
-                torch.cuda.set_rng_state_all(
-                    checkpoint["cuda_rng_state"]
-                )
 
-            if "numpy_rng_state" in checkpoint:
-                np.random.set_state(
-                    checkpoint["numpy_rng_state"]
-                )
+       model.load_state_dict(
+           checkpoint["model"]
+       )
 
-            if "python_rng_state" in checkpoint:
-                random.setstate(
-                    checkpoint["python_rng_state"]
-                )
 
-        return (
-            checkpoint.get("epoch", -1) + 1,
-            checkpoint.get("best_scores", {}) or {},
-        )
+       if optimizer is not None and "optimizer" in checkpoint:
+           optimizer.load_state_dict(checkpoint["optimizer"])
 
-    model.load_state_dict(checkpoint)
 
-    return 0, {}
+       if scheduler is not None and "scheduler" in checkpoint:
+           scheduler.load_state_dict(checkpoint["scheduler"])
+
+
+       if restore_rng:
+
+
+           if "torch_rng_state" in checkpoint:
+               torch.set_rng_state(
+                   checkpoint["torch_rng_state"].cpu()
+               )
+
+
+           if (
+               torch.cuda.is_available()
+               and "cuda_rng_state" in checkpoint
+           ):
+               torch.cuda.set_rng_state_all(
+                   checkpoint["cuda_rng_state"]
+               )
+
+
+           if "numpy_rng_state" in checkpoint:
+               np.random.set_state(
+                   checkpoint["numpy_rng_state"]
+               )
+
+
+           if "python_rng_state" in checkpoint:
+               random.setstate(
+                   checkpoint["python_rng_state"]
+               )
+
+
+       return (
+           checkpoint.get("epoch", -1) + 1,
+           checkpoint.get("best_scores", {}) or {},
+       )
+
+
+   model.load_state_dict(checkpoint)
+
+
+   return 0, {}
+
+
 
 
 # ================================================================
 # Main experiment
 # ================================================================
 
+
 def run(**cfg):
 
-    set_seed(cfg.get("seed"))
 
-    now_str = datetime.datetime.now().strftime(
-        "%Y%m%d-%H%M%S"
-    )
+   set_seed(cfg.get("seed"))
 
-    save_dir = (
-        Path(cfg["save_dir"])
-        / f'{cfg["save_name"]}_{now_str}'
-    )
 
-    save_dir.mkdir(
-        parents=True,
-        exist_ok=False,
-    )
+   now_str = datetime.datetime.now().strftime(
+       "%Y%m%d-%H%M%S"
+   )
 
-    cfg["save_dir"] = str(save_dir)
 
-    import yaml
+   save_dir = (
+       Path(cfg["save_dir"])
+       / f'{cfg["save_name"]}_{now_str}'
+   )
 
-    with (save_dir / "config.yaml").open("w") as file:
 
-        yaml.safe_dump(
-            cfg,
-            file,
-            sort_keys=False,
-        )
+   save_dir.mkdir(
+       parents=True,
+       exist_ok=False,
+   )
 
-    if cfg["train"].get("use_cudnn_backend", False):
-        torch.backends.cudnn.benchmark = True
 
-    # ------------------------------------------------------------
-    # Models
-    # ------------------------------------------------------------
+   cfg["save_dir"] = str(save_dir)
 
-    target_composition, model = build_models(cfg)
 
-    monolithic = cfg["model"].get(
-        "monolithic",
-        False,
-    )
+   import yaml
 
-    # ------------------------------------------------------------
-    # Datasets
-    # ------------------------------------------------------------
 
-    train_loader, eval_loaders = build_datasets(
-        cfg,
-        target_composition,
-    )
+   with (save_dir / "config.yaml").open("w") as file:
 
-    # ------------------------------------------------------------
-    # Loss
-    # ------------------------------------------------------------
 
-    criterion = build_criterion(
-        cfg["train"]["loss"],
-        **cfg["train"].get("loss_kwargs", {}),
-    )
+       yaml.safe_dump(
+           cfg,
+           file,
+           sort_keys=False,
+       )
 
-    # ------------------------------------------------------------
-    # Optimizer
-    # ------------------------------------------------------------
 
-    optimizer_class = getattr(
-        torch.optim,
-        cfg["train"]["optimizer"],
-    )
+   if cfg["train"].get("use_cudnn_backend", False):
+       torch.backends.cudnn.benchmark = True
 
-    optimizer = optimizer_class(
-        model.parameters(),
-        **cfg["train"].get("optimizer_kwargs", {}),
-    )
 
-    # ------------------------------------------------------------
-    # Scheduler
-    # ------------------------------------------------------------
+   # ------------------------------------------------------------
+   # Models
+   # ------------------------------------------------------------
 
-    scheduler = None
 
-    scheduler_name = cfg["train"].get("scheduler")
+   target_composition, model = build_models(cfg)
 
-    if scheduler_name:
 
-        scheduler_class = getattr(
-            torch.optim.lr_scheduler,
-            scheduler_name,
-        )
+   monolithic = cfg["model"].get(
+       "monolithic",
+       False,
+   )
 
-        scheduler = scheduler_class(
-            optimizer,
-            **cfg["train"].get("scheduler_kwargs", {}),
-        )
 
-    # ------------------------------------------------------------
-    # Checkpoint loading
-    # ------------------------------------------------------------
+   # ------------------------------------------------------------
+   # Datasets
+   # ------------------------------------------------------------
 
-    start_epoch = 0
-    best_scores = {}
 
-    checkpoint_path = cfg["train"].get("checkpoint")
+   train_loader, eval_loaders = build_datasets(
+       cfg,
+       target_composition,
+   )
 
-    if checkpoint_path:
 
-        start_epoch, best_scores = load_checkpoint(
-            checkpoint_path,
-            model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            restore_rng=True,
-        )
+   # ------------------------------------------------------------
+   # Loss
+   # ------------------------------------------------------------
 
-        print(
-            f"Resuming from checkpoint: {checkpoint_path}"
-        )
 
-        print(
-            f"Starting at epoch {start_epoch + 1}"
-        )
+   criterion = build_criterion(
+       cfg["train"]["loss"],
+       **cfg["train"].get("loss_kwargs", {}),
+   )
 
-    # ------------------------------------------------------------
-    # W&B
-    # ------------------------------------------------------------
 
-    wandb_run = None
-    wandb_cfg = cfg.get("wandb", {})
+   # ------------------------------------------------------------
+   # Optimizer
+   # ------------------------------------------------------------
 
-    if wandb_cfg.get("enabled", False):
 
-        if wandb is None:
+   optimizer_class = getattr(
+       torch.optim,
+       cfg["train"]["optimizer"],
+   )
 
-            raise ImportError(
-                "W&B is enabled but wandb is not installed."
-            )
 
-        wandb_run = wandb.init(
-            project=wandb_cfg.get("project", "CGFP"),
-            config=cfg,
-        )
+   optimizer = optimizer_class(
+       model.parameters(),
+       **cfg["train"].get("optimizer_kwargs", {}),
+   )
 
-        if wandb_cfg.get("watch", False):
 
-            wandb.watch(
-                model,
-                log="all",
-                log_freq=wandb_cfg.get("watch_freq", 1000),
-            )
+   # ------------------------------------------------------------
+   # Scheduler
+   # ------------------------------------------------------------
 
-    # ------------------------------------------------------------
-    # Evaluation configuration
-    # ------------------------------------------------------------
 
-    eval_cfg = cfg.get("eval", {})
+   scheduler = None
 
-    do_eval = bool(eval_cfg) and bool(eval_loaders)
 
-    metric_names = eval_cfg.get(
-        "metrics",
-        ["MSE", "R2ScoreVW"],
-    )
+   scheduler_name = cfg["train"].get("scheduler")
 
-    # ------------------------------------------------------------
-    # Visualization configuration
-    # ------------------------------------------------------------
 
-    vis_cfg = cfg.get("visualization", {})
-    do_vis = bool(vis_cfg)
+   if scheduler_name:
 
-    vis_freq = vis_cfg.get("freq", 1)
 
-    if vis_freq < 1:
+       scheduler_class = getattr(
+           torch.optim.lr_scheduler,
+           scheduler_name,
+       )
 
-        raise ValueError(
-            "Visualization frequency must be positive."
-        )
 
-    history = []
+       scheduler = scheduler_class(
+           optimizer,
+           **cfg["train"].get("scheduler_kwargs", {}),
+       )
 
-    # ============================================================
-    # Training
-    # ============================================================
 
-    try:
+   # ------------------------------------------------------------
+   # Checkpoint loading
+   # ------------------------------------------------------------
 
-        for epoch in tqdm(
-            range(start_epoch, cfg["train"]["epochs"]),
-            desc="Epochs",
-        ):
 
-            log = {}
+   start_epoch = 0
+   best_scores = {}
 
-            train_loss = train_epoch(
-                model,
-                train_loader,
-                optimizer,
-                criterion,
-                accum_batches=cfg["train"].get(
-                    "accum_batches",
-                    1,
-                ),
-                monolithic=monolithic,
-            )
 
-            log["loss"] = train_loss
+   checkpoint_path = cfg["train"].get("checkpoint")
 
-            # ----------------------------------------------------
-            # Evaluation
-            # ----------------------------------------------------
 
-            should_evaluate = (
-                do_eval
-                and (epoch + 1) % eval_cfg.get("freq", 1) == 0
-            )
+   if checkpoint_path:
 
-            if should_evaluate:
 
-                scores = evaluate(
-                    model,
-                    eval_loaders,
-                    metric_names,
-                    monolithic=monolithic,
-                )
+       start_epoch, best_scores = load_checkpoint(
+           checkpoint_path,
+           model,
+           optimizer=optimizer,
+           scheduler=scheduler,
+           restore_rng=True,
+       )
 
-                log.update(scores)
 
-                print(
-                    f"\nEpoch {epoch + 1}/{cfg['train']['epochs']} "
-                    f"| Training loss: {train_loss:.6f}"
-                )
+       print(
+           f"Resuming from checkpoint: {checkpoint_path}"
+       )
 
-                for metric_name, value in scores.items():
 
-                    print(
-                        f"  {metric_name}: {value:.6f}"
-                    )
+       print(
+           f"Starting at epoch {start_epoch + 1}"
+       )
 
-                # Track the best All MSE when available.
-                if "MSE_All" in scores:
 
-                    current = scores["MSE_All"]
-                    previous = best_scores.get(
-                        "MSE_All",
-                        float("inf"),
-                    )
+   # ------------------------------------------------------------
+   # W&B
+   # ------------------------------------------------------------
 
-                    if current < previous:
 
-                        best_scores["MSE_All"] = current
+   wandb_run = None
+   wandb_cfg = cfg.get("wandb", {})
 
-                        save_checkpoint(
-                            save_dir / "best_checkpoint.pt",
-                            model,
-                            optimizer,
-                            scheduler,
-                            epoch + 1,
-                            best_scores,
-                            cfg,
-                        )
 
-            # ----------------------------------------------------
-            # Scheduler
-            # ----------------------------------------------------
+   if wandb_cfg.get("enabled", False):
 
-            if scheduler is not None:
 
-                if isinstance(
-                    scheduler,
-                    torch.optim.lr_scheduler.ReduceLROnPlateau,
-                ):
+       if wandb is None:
 
-                    scheduler.step(train_loss)
 
-                else:
+           raise ImportError(
+               "W&B is enabled but wandb is not installed."
+           )
 
-                    scheduler.step()
 
-            learning_rate = optimizer.param_groups[0]["lr"]
+       wandb_run = wandb.init(
+           project=wandb_cfg.get("project", "CGFP"),
+           config=cfg,
+       )
 
-            log["learning_rate"] = learning_rate
 
-            # ----------------------------------------------------
-            # Visualizations
-            # ----------------------------------------------------
+       if wandb_cfg.get("watch", False):
 
-            if do_vis and (epoch + 1) % vis_freq == 0:
 
-                for vis_name, vis_data_cfg in (
-                    vis_cfg.get("data", {}).items()
-                ):
+           wandb.watch(
+               model,
+               log="all",
+               log_freq=wandb_cfg.get("watch_freq", 1000),
+           )
 
-                    if vis_name not in eval_loaders:
 
-                        print(
-                            f"Skipping visualization '{vis_name}': "
-                            "no matching evaluation loader."
-                        )
+   # ------------------------------------------------------------
+   # Evaluation configuration
+   # ------------------------------------------------------------
 
-                        continue
 
-                    vis_type = vis_data_cfg["type"]
+   eval_cfg = cfg.get("eval", {})
 
-                    if vis_type == "heatmap":
 
-                        fig = visualize_mse_on_grid(
-                            model,
-                            eval_loaders[vis_name],
-                            monolithic=monolithic,
-                        )
+   do_eval = bool(eval_cfg) and bool(eval_loaders)
 
-                    elif vis_type == "reconstruction":
 
-                        fig = visualize_reconstruction(
-                            model,
-                            eval_loaders[vis_name],
-                            monolithic=monolithic,
-                        )
+   metric_names = eval_cfg.get(
+       "metrics",
+       ["MSE", "R2ScoreVW"],
+   )
 
-                    else:
 
-                        raise ValueError(
-                            f"Unsupported visualization type: {vis_type}"
-                        )
+   # ------------------------------------------------------------
+   # Visualization configuration
+   # ------------------------------------------------------------
 
-                    if wandb_run is not None:
-                        log[vis_name] = wandb.Image(fig)
 
-                    fig.savefig(
-                        save_dir
-                        / f"{vis_name}_epoch_{epoch + 1}.png",
-                        bbox_inches="tight",
-                    )
+   vis_cfg = cfg.get("visualization", {})
+   do_vis = bool(vis_cfg)
 
-                    plt.close(fig)
 
-            # ----------------------------------------------------
-            # Logging
-            # ----------------------------------------------------
+   vis_freq = vis_cfg.get("freq", 1)
 
-            history.append(log)
 
-            if wandb_run is not None:
-                wandb.log(log, step=epoch)
+   if vis_freq < 1:
 
-        # ========================================================
-        # FINAL EVALUATION
-        # ========================================================
 
-        print("\n")
-        print("=" * 65)
-        print("FINAL TRAINING AND EVALUATION RESULTS")
-        print("=" * 65)
+       raise ValueError(
+           "Visualization frequency must be positive."
+       )
 
-        model.eval()
 
-        final_train_scores = evaluate(
-            model,
-            {"Train": train_loader},
-            ["MSE"],
-            monolithic=monolithic,
-        )
+   history = []
 
-        final_train_mse = final_train_scores["MSE_Train"]
 
-        print(
-            f"\nFinal training MSE: "
-            f"{final_train_mse:.8f}"
-        )
+   # ============================================================
+   # Training
+   # ============================================================
 
-        final_eval_scores = {}
 
-        if eval_loaders:
+   try:
 
-            final_eval_scores = evaluate(
-                model,
-                eval_loaders,
-                ["MSE"],
-                monolithic=monolithic,
-            )
 
-            print("\nFinal evaluation MSE:")
+       for epoch in tqdm(
+           range(start_epoch, cfg["train"]["epochs"]),
+           desc="Epochs",
+       ):
 
-            for metric_name, value in final_eval_scores.items():
 
-                print(
-                    f"  {metric_name}: {value:.8f}"
-                )
+           log = {}
 
-        else:
 
-            print(
-                "\nNo evaluation datasets were configured."
-            )
+           train_loss = train_epoch(
+               model,
+               train_loader,
+               optimizer,
+               criterion,
+               accum_batches=cfg["train"].get(
+                   "accum_batches",
+                   1,
+               ),
+               monolithic=monolithic,
+           )
 
-        final_r2_scores = {}
 
-        requested_r2 = [
-            name
-            for name in metric_names
-            if name in ("R2Score", "R2ScoreVW")
-        ]
+           log["loss"] = train_loss
 
-        if eval_loaders and requested_r2:
 
-            final_r2_scores = evaluate(
-                model,
-                eval_loaders,
-                requested_r2,
-                monolithic=monolithic,
-            )
+           # ----------------------------------------------------
+           # Evaluation
+           # ----------------------------------------------------
 
-            print("\nFinal R2 metrics:")
 
-            for metric_name, value in final_r2_scores.items():
+           should_evaluate = (
+               do_eval
+               and (epoch + 1) % eval_cfg.get("freq", 1) == 0
+           )
 
-                print(
-                    f"  {metric_name}: {value:.8f}"
-                )
 
-        print("\n" + "=" * 65)
-        print("FINAL EVALUATION COMPLETE")
-        print("=" * 65 + "\n")
+           if should_evaluate:
 
-        final_results = {
-            "final_train_mse": final_train_mse,
-            **final_eval_scores,
-            **final_r2_scores,
-        }
 
-        history.append(final_results)
+               scores = evaluate(
+                   model,
+                   eval_loaders,
+                   metric_names,
+                   monolithic=monolithic,
+               )
 
-        with (save_dir / "final_results.txt").open("w") as file:
 
-            file.write(
-                "FINAL TRAINING AND EVALUATION RESULTS\n"
-            )
+               log.update(scores)
 
-            file.write("=" * 50 + "\n\n")
 
-            file.write(
-                f"Final training MSE: {final_train_mse:.8f}\n\n"
-            )
+               print(
+                   f"\nEpoch {epoch + 1}/{cfg['train']['epochs']} "
+                   f"| Training loss: {train_loss:.6f}"
+               )
 
-            file.write("Final evaluation metrics:\n")
 
-            for metric_name, value in final_eval_scores.items():
+               for metric_name, value in scores.items():
 
-                file.write(
-                    f"{metric_name}: {value:.8f}\n"
-                )
 
-            for metric_name, value in final_r2_scores.items():
+                   print(
+                       f"  {metric_name}: {value:.6f}"
+                   )
 
-                file.write(
-                    f"{metric_name}: {value:.8f}\n"
-                )
 
-        # Always save a final checkpoint.
-        save_checkpoint(
-            save_dir / "final_checkpoint.pt",
-            model,
-            optimizer,
-            scheduler,
-            cfg["train"]["epochs"],
-            best_scores,
-            cfg,
-        )
+               # Track the best All MSE when available.
+               if "MSE_All" in scores:
 
-        if wandb_run is not None:
-            wandb.log(final_results)
 
-        print(
-            f"Final results saved to: "
-            f"{save_dir / 'final_results.txt'}"
-        )
+                   current = scores["MSE_All"]
+                   previous = best_scores.get(
+                       "MSE_All",
+                       float("inf"),
+                   )
 
-    finally:
 
-        if wandb_run is not None:
-            wandb.finish()
+                   if current < previous:
 
-    return model, history
 
+                       best_scores["MSE_All"] = current
 
-# ================================================================
-# Default configuration
-# ================================================================
 
-DEFAULT_CONFIG = {
+                       save_checkpoint(
+                           save_dir / "best_checkpoint.pt",
+                           model,
+                           optimizer,
+                           scheduler,
+                           epoch + 1,
+                           best_scores,
+                           cfg,
+                       )
 
-    "save_dir": "./experiments",
 
-    "save_name": "two_sprite_dsprites_original_cgfp",
+           # ----------------------------------------------------
+           # Scheduler
+           # ----------------------------------------------------
 
-    "seed": 42,
 
-    "data": {
+           if scheduler is not None:
 
-        "root": "/mnt/primary/compositional-ood-generalization/data/dsprites",
 
-        "D": [5, 5],
+               if isinstance(
+                   scheduler,
+                   torch.optim.lr_scheduler.ReduceLROnPlateau,
+               ):
 
-        "M": [
-            [64, 64, 1],
-            [64, 64, 1],
-        ],
 
-        "C": "OccludeAdd",
+                   scheduler.step(train_loss)
 
-        "C_kwargs": {
-            "add": "sigmoid",
-            "color_channel": False,
-        },
 
-        "trainable_C_kwargs": {
-            "add": "sigmoid",
-            "color_channel": False,
-        },
+               else:
 
-        "cache_batch_size": 256,
 
-        "num_workers": 0,
-    },
+                   scheduler.step()
 
-    "model": {
 
-        "monolithic": False,
+           learning_rate = optimizer.param_groups[0]["lr"]
 
-        "reuse_phi": False,
 
-        "phi": "UpsampleMLP",
+           log["learning_rate"] = learning_rate
 
-        "phi_kwargs": {
-            "d_hidden": 256,
-            "n_channel": 32,
-            "kernel_size": 2,
-            "nonlin": "ELU",
-            "clamp": None,
-        },
-    },
 
-    "train": {
+           # ----------------------------------------------------
+           # Visualizations
+           # ----------------------------------------------------
 
-        "n_samples": 100000,
 
-        "sampling": "random",
+           if do_vis and (epoch + 1) % vis_freq == 0:
 
-        "sampling_kwargs": {},
 
-        "batch_size": 512,
+               for vis_name, vis_data_cfg in (
+                   vis_cfg.get("data", {}).items()
+               ):
 
-        "epochs": 2000,
 
-        "accum_batches": 1,
+                   if vis_name not in eval_loaders:
 
-        "loss": "MSE",
 
-        "loss_kwargs": {},
+                       print(
+                           f"Skipping visualization '{vis_name}': "
+                           "no matching evaluation loader."
+                       )
 
-        "optimizer": "AdamW",
 
-        "optimizer_kwargs": {
-            "lr": 0.001,
-            "weight_decay": 1e-5,
-        },
+                       continue
 
-        "scheduler": "CosineAnnealingLR",
 
-        "scheduler_kwargs": {
-            "T_max": 2000,
-            "eta_min": 1e-5,
-        },
+                   vis_type = vis_data_cfg["type"]
 
-        # Optional path to a checkpoint to resume.
-        "checkpoint": None,
 
-        "use_cudnn_backend": True,
-    },
+                   if vis_type == "heatmap":
 
-    "eval": {
 
-        "freq": 100,
+                       fig = visualize_mse_on_grid(
+                           model,
+                           eval_loaders[vis_name],
+                           monolithic=monolithic,
+                       )
 
-        "batch_size": 1000,
 
-        "metrics": [
-            "MSE",
-            "R2Score",
-            "R2ScoreVW",
-        ],
+                   elif vis_type == "reconstruction":
 
-        "save_scores": {
-            "MSE_All": "min",
-        },
 
-        "data": {
+                       fig = visualize_reconstruction(
+                           model,
+                           eval_loaders[vis_name],
+                           monolithic=monolithic,
+                       )
 
-            "ID": {
-                "sampling": "random",
-                "n_samples": 10000,
-                "seed": 10042,
-            },
 
-            "All": {
-                "sampling": "random",
-                "n_samples": 10000,
-                "seed": 20042,
-            },
+                   else:
 
-            "ContinuousRandomAll": {
-                "sampling": "continuous_random",
-                "n_samples": 10000,
-                "seed": 30042,
-            },
-        },
-    },
 
-    "visualization": {
+                       raise ValueError(
+                           f"Unsupported visualization type: {vis_type}"
+                       )
 
-        "freq": 100,
 
-        "data": {
+                   if wandb_run is not None:
+                       log[vis_name] = wandb.Image(fig)
 
-            "ID": {
-                "type": "reconstruction",
-            },
 
-            "All": {
-                "type": "reconstruction",
-            },
-        },
-    },
+                   fig.savefig(
+                       save_dir
+                       / f"{vis_name}_epoch_{epoch + 1}.png",
+                       bbox_inches="tight",
+                   )
 
-    "wandb": {
 
-        "enabled": False,
+                   plt.close(fig)
 
-        "project": "CGFP",
 
-        "watch": False,
+           # ----------------------------------------------------
+           # Logging
+           # ----------------------------------------------------
 
-        "watch_freq": 100,
-    },
-}
 
+           history.append(log)
 
-# ================================================================
-# Configuration merging
-# ================================================================
 
-def deep_update(base, update):
+           if wandb_run is not None:
+               wandb.log(log, step=epoch)
 
-    for key, value in update.items():
 
-        if (
-            key in base
-            and isinstance(base[key], dict)
-            and isinstance(value, dict)
-        ):
+       # ========================================================
+       # FINAL EVALUATION
+       # ========================================================
 
-            deep_update(base[key], value)
 
-        else:
+       print("\n")
+       print("=" * 65)
+       print("FINAL TRAINING AND EVALUATION RESULTS")
+       print("=" * 65)
 
-            base[key] = copy.deepcopy(value)
 
-    return base
+       model.eval()
 
 
-# ================================================================
-# Command-line entry point
-# ================================================================
+       final_train_scores = evaluate(
+           model,
+           {"Train": train_loader},
+           ["MSE"],
+           monolithic=monolithic,
+       )
 
-if __name__ == "__main__":
 
-    import yaml
+       final_train_mse = final_train_scores["MSE_Train"]
 
-    parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Optional YAML configuration file.",
-    )
+       print(
+           f"\nFinal training MSE: "
+           f"{final_train_mse:.8f}"
+       )
 
-    args = parser.parse_args()
 
-    config = copy.deepcopy(DEFAULT_CONFIG)
+       final_eval_scores = {}
 
-    if args.config is not None:
 
-        with open(args.config, "r") as file:
-            user_config = yaml.safe_load(file) or {}
+       if eval_loaders:
 
-        config = deep_update(
-            config,
-            user_config,
-        )
 
-    run(**config)
+           final_eval_scores = evaluate(
+               model,
+               eval_loaders,
+               ["MSE"],
+               monolithic=monolithic,
+           )
+
+
+           print("\nFinal evaluation MSE:")
+
+
+           for metric_name, value in final_eval_scores.items():
+
+
+               print(
+                   f"  {metric_name}: {value:.8f}"
+               )
+
+
+       else:
+
+
+           print(
+               "\nNo evaluation datasets were configured."
+           )
+
+
+       final_r2_scores = {}
+
+
+       requested_r2 = [
+           name
+           for name in metric_names
+           if name in ("R2Score", "R2ScoreVW")
+       ]
+
+
+       if eval_loaders and requested_r2:
+
+
+           final_r2_scores = evaluate(
+               model,
+               eval_loaders,
+               requested_r2,
+               monolithic=monolithic,
+           )
+
+
+           print("\nFinal R2 metrics:")
+
+
+           for metric_name, value in final_r2_scores.items():
+
+
+               print(
+                   f"  {metric_name}: {value:.8f}"
+               )
+
+
+       print("\n" + "=" * 65)
+       print("FINAL EVALUATION COMPLETE")
+       print("=" * 65 + "\n")
+
+
+       final_results = {
+           "final_train_mse": final_train_mse,
+           **final_eval_scores,
+           **final_r2_scores,
+       }
+
+
+       history.append(final_results)
+
+
+       with (save_dir / "final_results.txt").open("w") as file:
+
+
+           file.write(
+               "FINAL TRAINING AND EVALUATION RESULTS\n"
+           )
+
+
+           file.write("=" * 50 + "\n\n")
+
+
+           file.write(
+               f"Final training MSE: {final_train_mse:.8f}\n\n"
+           )
+
+
+           file.write("Final evaluation metrics:\n")
+
+
+           for metric_name, value in final_eval_scores.items():
+
+
+               file.write(
+                   f"{metric_name}: {value:.8f}\n"
+               )
+
+
+           for metric_name, value in final_r2_scores.items():
+
+
+               file.write(
+                   f"{metric_name}: {value:.8f}\n"
+               )
+
+
+       # Always save a final checkpoint.
+       save_checkpoint(
+           save_dir / "final_checkpoint.pt",
+           model,
+           optimizer,
+           scheduler,
+           cfg["train"]["epochs"],
+           best_scores,
+           cfg,
+       )
+
+
+       if wandb_run is not None:
+           wandb.log(final_results)
+
+
+       print(
+           f"Final results saved to: "
+           f"{save_dir / 'final_results.txt'}"
+       )
+
+
+   finally:
+
+
+       if wandb_run is not None:
+           wandb.finish()
+
+
+   return model, history
