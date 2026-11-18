@@ -112,6 +112,13 @@ python main.py --config cfgs/baseline.yml
 
 The goal is to understand how training data distributions shape learned representations and influence a neural network's ability to generalise compositionally to unseen configurations.
 
+
+## Experimental Results
+
+![Two-Sprite Compositional Learning](images/DSpriteComp.gif)
+
+
+
 ## References
 
 - [Necessary Compositionality](https://arxiv.org/pdf/2602.24264)
