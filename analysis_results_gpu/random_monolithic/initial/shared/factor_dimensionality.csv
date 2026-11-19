@@ -1,0 +1,9 @@
+condition,architecture,level,slot,evaluation,device,dtype,primary_factorisation_metric,orthogonality_space,whitening_epsilon,factor,n_values,k95,effective_rank,variance_explained_by_k95,total_factor_variance
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_shape,3,2,1.6827071796885207,1.0,57469.92536609339
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_scale,6,2,1.8585250625801923,0.958622437436518,42528.7307860334
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_x_position,32,2,2.1922695670516648,0.9602144232085554,1354416.3642119863
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_y_position,32,2,2.1024063375405007,0.9679505046285419,1447938.9575109454
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot2_shape,3,2,1.47939682917491,1.0,37320.00277241397
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot2_scale,6,2,1.862989637756247,0.9523262898655329,14692.490504512076
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot2_x_position,32,3,2.415023215541729,0.9590979723292047,561768.9872651094
+random_monolithic,monolithic,initial,shared,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot2_y_position,32,3,2.7826618735679203,0.9504261233346608,457452.440007787

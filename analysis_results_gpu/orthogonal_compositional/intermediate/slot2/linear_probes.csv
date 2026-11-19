@@ -1,0 +1,5 @@
+source,factor,factor_index,accuracy,balanced_accuracy,chance_balanced_accuracy,chance_adjusted_balanced_accuracy,n_classes
+slot2,slot2_shape,5,1.0,1.0,0.3333333333333333,1.0,3
+slot2,slot2_scale,6,0.999,0.9990421455938697,0.16666666666666666,0.9988505747126437,6
+slot2,slot2_x_position,8,0.8310000000000001,0.8315842514980518,0.03125,0.8261514854173438,32
+slot2,slot2_y_position,9,0.807,0.8059713357956981,0.03125,0.7997123466278174,32

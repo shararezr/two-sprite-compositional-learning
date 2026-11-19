@@ -1,0 +1,11 @@
+factor_a,factor_b,comparison_type,mean_absolute_cosine,max_absolute_cosine,n_comparisons,valid_values_a,valid_values_b
+slot2_shape,slot2_shape,within,0.5127999033835315,0.8726560705874424,6,3,3
+slot2_shape,slot2_scale,across,0.08845758941606327,0.18733349120387432,18,3,6
+slot2_shape,slot2_x_position,across,0.06428493072011122,0.2094414998329947,96,3,32
+slot2_shape,slot2_y_position,across,0.14188390273185036,0.3409680229774794,96,3,32
+slot2_scale,slot2_scale,within,0.6614238537169668,0.9612563471747853,30,6,6
+slot2_scale,slot2_x_position,across,0.09412322064389189,0.2825772040139901,192,6,32
+slot2_scale,slot2_y_position,across,0.17219177204077477,0.44437110417527365,192,6,32
+slot2_x_position,slot2_x_position,within,0.692159497799254,0.9980825267661849,992,32,32
+slot2_x_position,slot2_y_position,across,0.1325271183226246,0.6058719786169977,1024,32,32
+slot2_y_position,slot2_y_position,within,0.7050643046413967,0.9980364068230471,992,32,32

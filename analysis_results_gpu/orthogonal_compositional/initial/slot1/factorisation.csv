@@ -1,0 +1,2 @@
+condition,architecture,level,slot,evaluation,device,dtype,primary_factorisation_metric,orthogonality_space,whitening_epsilon,raw_r2,projected_r2,projected_whitened_r2,raw_rmse,projected_rmse,projected_whitened_rmse,probe_span_rank
+orthogonal_compositional,compositional,initial,slot1,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,0.7782019846488114,0.9175942878248359,0.1893208080049722,16.999834533322538,14.203083872743264,0.9001950669028789,69

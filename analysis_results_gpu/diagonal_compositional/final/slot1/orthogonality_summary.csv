@@ -1,0 +1,2 @@
+condition,architecture,level,slot,evaluation,device,dtype,primary_factorisation_metric,orthogonality_space,whitening_epsilon,mean_within_factor_absolute_cosine,mean_across_factor_absolute_cosine,n_within_comparisons,n_across_comparisons
+diagonal_compositional,compositional,final,slot1,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,0.8042451750607371,0.2119658878225473,2020,1618

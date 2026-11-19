@@ -1,0 +1,5 @@
+condition,architecture,level,slot,evaluation,device,dtype,primary_factorisation_metric,orthogonality_space,whitening_epsilon,factor,n_values,k95,effective_rank,variance_explained_by_k95,total_factor_variance
+orthogonal_compositional,compositional,final,slot1,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_shape,3,2,1.8827083637532351,1.0,53585181.77485661
+orthogonal_compositional,compositional,final,slot1,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_scale,6,1,1.053913027371969,0.9923929457677123,73786541.59045842
+orthogonal_compositional,compositional,final,slot1,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_x_position,32,2,1.2920895539912185,0.9865165863314634,1724693297.3536491
+orthogonal_compositional,compositional,final,slot1,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,slot1_y_position,32,2,1.3037986392051162,0.9857809636708483,2072491012.9848971

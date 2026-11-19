@@ -1,0 +1,2 @@
+condition,architecture,level,slot,evaluation,device,dtype,primary_factorisation_metric,orthogonality_space,whitening_epsilon,effective_dimensionality,k95,total_components,variance_explained_by_k95
+orthogonal_compositional,compositional,initial,slot2,IID held-out split,cuda,torch.float64,projected_whitened_r2,original representation space,1e-09,5.428683373697076,13,512,0.9518164732521641
