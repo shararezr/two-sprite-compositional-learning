@@ -72,8 +72,8 @@ After downloading, place the dataset in a local directory and update the dataset
 For example:
 
 ```python
-"data": {\
-    "root": "/path/to/your/dsprites"\
+"data": {
+    "root": "/path/to/your/dsprites"
 }
 ```
 
