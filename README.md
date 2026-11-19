@@ -27,10 +27,9 @@ The project has two main objectives:
 
 We compare different training data sampling strategies:
 
-- Independent uniform sampling (baseline).
-- Balanced sampling.
-- Correlated sampling.
-- Anti-correlated sampling.
+- Random sampling (baseline).
+- Orthogonal sampling.
+- Diagonal sampling.
 - Structured or block sampling.
 
 To ensure fair comparisons, we keep the model architecture, loss function, optimizer, training schedule, and evaluation datasets fixed. Experiments are repeated across multiple random seeds.
