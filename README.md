@@ -105,6 +105,20 @@ Run an experiment with a custom configuration:
 python main.py --config cfgs/baseline.yml
 ```
 
+
+## Representation Extraction and Analysis
+
+This project includes scripts for extracting and analysing internal representations from trained models.
+
+### Representation Extraction
+
+After training a model, extract its internal representations using:
+
+```bash
+python src/extract_representations.py --help
+
+
+
 ## Goal
 
 The goal is to understand how training data distributions shape learned representations and influence a neural network's ability to generalise compositionally to unseen configurations.
