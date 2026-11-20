@@ -108,16 +108,92 @@ python main.py --config cfgs/baseline.yml
 
 ## Representation Extraction and Analysis
 
-This project includes scripts for extracting and analysing internal representations from trained models.
+This project includes scripts for extracting and analysing internal representations from trained models. The analysis is used to investigate how different training data sampling strategies and model architectures influence the geometry and structure of learned representations.
 
-### Representation Extraction
+### 1. Representation Extraction
 
 After training a model, extract its internal representations using:
 
 ```bash
 python src/extract_representations.py --help
+```
 
+The extraction script supports loading latent configurations from `.npy` files using the `--latents` argument. This allows representations to be extracted from different datasets, including held-out evaluation sets for out-of-distribution (OOD) analysis.
 
+Representations are extracted at three levels of the network:
+
+- **Initial**: Output of the final fully connected layer, before unflattening.
+- **Intermediate**: Output of the first convolutional layer.
+- **Final**: Output of the penultimate convolutional layer, before the final image-producing convolution.
+
+The extracted representations and corresponding latent labels are saved in the `representations/` directory.
+
+### 2. Representation Analysis
+
+Two scripts are available for analysing the extracted representations.
+
+**Standard analysis:**
+
+```bash
+python src/analyze_representations.py --help
+```
+
+**GPU-accelerated analysis:**
+
+```bash
+python src/analyze_representations_gpu.py --help
+```
+
+The GPU version uses CUDA when available to accelerate linear probe fitting.
+
+The analysis evaluates the following properties of the learned representations:
+
+- **Linear probes**: Measure how accurately individual generative factors can be decoded using linear classifiers.
+- **Factorisation**: Evaluate how well the representation separates information associated with individual generative factors.
+- **Orthogonality**: Measure cosine similarities between factor-associated directions.
+- **Principal angles**: Measure geometric relationships between factor subspaces.
+- **Dimensionality**: Estimate the effective rank and the number of dimensions required to explain 95% of the variance.
+- **Cross-slot leakage**: Measure how much information about one sprite's attributes is present in the representation of the other sprite. This analysis applies to compositional models.
+
+### 3. Analysis Results
+
+Analysis outputs are saved in the `analysis_results_gpu/` directory when using the GPU analysis script.
+
+The directory is organised by experimental condition, representation level, and model architecture:
+
+```text
+analysis_results_gpu/
+├── random_compositional/
+├── orthogonal_compositional/
+├── diagonal_compositional/
+├── random_monolithic/
+├── orthogonal_monolithic/
+└── diagonal_monolithic/
+```
+
+Each experimental condition contains separate directories for the initial, intermediate, and final representation levels.
+
+Compositional models have separate representation directories for each sprite slot (`slot1` and `slot2`), whereas monolithic models use a shared representation directory (`shared`).
+
+The analysis exports CSV files containing the calculated metrics:
+
+- `linear_probes.csv`
+- `factorisation.csv`
+- `factor_dimensionality.csv`
+- `factor_subspace_overlap.csv`
+- `orthogonality_matrix.csv`
+- `orthogonality_pairs.csv`
+- `orthogonality_summary.csv`
+- `overall_dimensionality.csv`
+- `cross_slot_leakage.csv` (compositional models only)
+
+These files can be used for further analysis and visualisation in Python notebooks.
+
+### 4. Reproducibility
+
+For meaningful comparisons across experimental conditions, use the same latent evaluation samples and their ordering when extracting representations from different checkpoints.
+
+Record the checkpoint, experimental condition, representation level, and analysis settings to ensure reproducibility.
 
 ## Goal
 
